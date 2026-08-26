@@ -1,42 +1,25 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
+# dependencias
 /node_modules
-/.pnp
-.pnp.js
 
-# testing
+# build / cobertura
+/build
+/dist
 /coverage
 
-# next.js
-/.next/
-/out/
+# datos generados en runtime
+/data
+/uploads
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
-# production
-/build
+# variables de entorno (.env.example sí se versiona)
+.env
+.env.local
+.env.*.local
 
 # misc
 .DS_Store
+*.log
 *.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local env files
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# vercel
-.vercel
-
-**/*.trace
-**/*.zip
-**/*.tar.gz
-**/*.tgz
-**/*.log
 package-lock.json
-**/*.bun
