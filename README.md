@@ -39,6 +39,16 @@ Para inspeccionar los datos visualmente:
 bun run db:studio
 ```
 
+Para cargar datos de prueba (el comando es idempotente y no borra datos existentes):
+
+```bash
+bun run db:seed
+```
+
+El seed crea publicaciones, favoritos, búsquedas, preguntas, ofertas, una operación y reseñas.
+También crea `ana@example.com`, `bruno@example.com` y `carla@example.com`; los tres usuarios
+pueden iniciar sesión con la contraseña `password123`.
+
 Al iniciar la API también se aplican automáticamente las migraciones pendientes, incluyendo en los tests con una base SQLite en memoria.
 
 ## Estructura

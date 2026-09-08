@@ -71,6 +71,9 @@ export function createApp(db: AppDatabase = createDatabase()) {
     .onRequest(({ set }) => {
       Object.assign(set.headers, CORS_HEADERS);
     })
+    .onAfterResponse(({ request, set }) => {
+      console.log(`${request.method} ${new URL(request.url).pathname} ${set.status ?? 200}`);
+    })
     .onError(({ code, error, status }) => {
       if (error instanceof ApiError)
         return status(error.statusCode, { error: { code: error.code, message: error.message } });

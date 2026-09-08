@@ -15,7 +15,7 @@ const nodeEnv = Bun.env.NODE_ENV ?? "development";
 export const config = {
   name: "Marketplace API",
   version: pkg.version,
-  port: envNumber("PORT", 3000),
+  port: envNumber("PORT", 3001),
   databasePath: Bun.env.DATABASE_PATH ?? "data/marketplace.sqlite",
   otpTtlMinutes: envNumber("OTP_TTL_MINUTES", 10),
   sessionDays: envNumber("SESSION_DAYS", 30),
