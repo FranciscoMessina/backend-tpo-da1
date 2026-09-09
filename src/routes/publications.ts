@@ -222,6 +222,7 @@ export function publicationRoutes(db: AppDatabase) {
             zone: body.zone ?? user.zone,
             status: "draft",
             draftStep,
+            publishedAt: now,
             createdAt: now,
             updatedAt: now,
           })
