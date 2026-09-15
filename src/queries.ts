@@ -1,6 +1,7 @@
-import { asc, avg, count, eq, inArray } from "drizzle-orm";
+import { and, asc, avg, count, eq, inArray, lte, or } from "drizzle-orm";
 import type { AppDatabase } from "./database";
-import { operations, publicationImages, reviews, users } from "./db/schema";
+import { offers, operations, publicationImages, reviews, users } from "./db/schema";
+import { nowIso } from "./utils";
 
 export function listImages(db: AppDatabase, publicationId: string) {
   return db
@@ -39,10 +40,13 @@ export function replaceImages(db: AppDatabase, publicationId: string, imageUrls:
   });
 }
 
-/** Perfil público con reputación: promedio de calificaciones, compras y ventas concretadas. */
+/**
+ * Consigna 2 (Perfil y Reputación): perfil público con reputación (promedio de estrellas,
+ * cantidad de operaciones como comprador y como vendedor) y antigüedad en la plataforma.
+ */
 export function getPublicUser(db: AppDatabase, userId: string) {
   const user = db
-    .select({ id: users.id, name: users.name, zone: users.zone, memberSince: users.createdAt })
+    .select({ id: users.id, name: users.name, zone: users.zone, avatarUrl: users.avatarUrl, memberSince: users.createdAt })
     .from(users)
     .where(eq(users.id, userId))
     .get();
@@ -63,4 +67,29 @@ export function getPublicUser(db: AppDatabase, userId: string) {
     purchasesCompleted: purchases?.total ?? 0,
     salesCompleted: sales?.total ?? 0,
   };
+}
+
+/**
+ * Consigna 7 (Ofertas y Negociación): "cada oferta tiene ... un plazo de vigencia, pasado el
+ * cual caduca automáticamente". Se aplica de forma perezosa (al leer/actuar sobre ofertas) en
+ * vez de con un cron, porque alcanza para el alcance de esta API.
+ */
+export function expireStaleOffers(db: AppDatabase) {
+  db.update(offers)
+    .set({ status: "expired", updatedAt: nowIso() })
+    .where(and(or(eq(offers.status, "pending"), eq(offers.status, "countered")), lte(offers.expiresAt, nowIso())))
+    .run();
+}
+
+/**
+ * Consigna 4/8: la dirección exacta de una publicación solo se revela al vendedor y al
+ * comprador cuya oferta fue aceptada ("si la oferta es aceptada, recién se puede observar
+ * la dirección de entrega").
+ */
+export function hasAcceptedOffer(db: AppDatabase, publicationId: string, buyerId: string) {
+  return !!db
+    .select({ id: operations.id })
+    .from(operations)
+    .where(and(eq(operations.publicationId, publicationId), eq(operations.buyerId, buyerId)))
+    .get();
 }

@@ -14,6 +14,7 @@ const authUserColumns = {
   name: users.name,
   phone: users.phone,
   zone: users.zone,
+  avatarUrl: users.avatarUrl,
   createdAt: users.createdAt,
 };
 
@@ -24,6 +25,7 @@ export type AuthUser = {
   name: string;
   phone: string | null;
   zone: string | null;
+  avatarUrl: string | null;
   createdAt: string;
 };
 

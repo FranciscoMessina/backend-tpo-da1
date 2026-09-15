@@ -6,7 +6,7 @@ import { optionalUser, requireUser } from "../auth";
 import type { AppDatabase } from "../database";
 import { favorites, publications, questions, savedSearches, users } from "../db/schema";
 import { ApiError } from "../errors";
-import { getCoverImages, getPublicUser, listImages, replaceImages } from "../queries";
+import { getCoverImages, getPublicUser, hasAcceptedOffer, listImages, replaceImages } from "../queries";
 import {
   categories,
   categorySchema,
@@ -16,13 +16,10 @@ import {
   sortSchema,
   zoneSchema,
 } from "../types";
-import { centsFromPrice, nowIso, parsePositiveInt, priceFromCents } from "../utils";
+import { buildDirectionsUrl, centsFromPrice, nowIso, parsePositiveInt, priceFromCents } from "../utils";
 
 type Publication = typeof publications.$inferSelect;
 type SavedSearch = typeof savedSearches.$inferSelect;
-
-/** Campos obligatorios para que un borrador pueda pasar a `active`. */
-const REQUIRED_TO_PUBLISH = ["title", "description", "category", "priceCents", "itemCondition", "zone"] as const;
 
 const EXTENSION_BY_MIME: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -33,15 +30,37 @@ const ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
 const UPLOADS_DIR = "uploads";
 const UPLOAD_FILENAME_PATTERN = /^[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i;
 
-const publicationBody = t.Object({
+// El paso a paso de la carga guiada (consigna 5) vive enteramente en el cliente Android: la app
+// guarda el progreso localmente (por eso "al volver encuentra el borrador conservado") y recién
+// llama a la API una vez completo. Por eso acá no hay estado "draft" ni `draftStep`: todos estos
+// campos son obligatorios tanto para crear como para editar una publicación.
+const addressSchema = t.String({ minLength: 3, maxLength: 200 });
+const latLngSchema = { latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) };
+
+const createPublicationBody = t.Object({
+  title: t.String({ minLength: 3, maxLength: 120 }),
+  description: t.String({ minLength: 10, maxLength: 5000 }),
+  category: categorySchema,
+  price: priceSchema,
+  condition: conditionSchema,
+  zone: zoneSchema,
+  // Consigna 5: "dirección exacta (cargar coordenadas)".
+  address: addressSchema,
+  ...latLngSchema,
+  imageUrls: t.Array(t.String({ format: "uri", maxLength: 2000 }), { minItems: 1, maxItems: 10 }),
+});
+
+const updatePublicationBody = t.Object({
   title: t.Optional(t.String({ minLength: 3, maxLength: 120 })),
   description: t.Optional(t.String({ minLength: 10, maxLength: 5000 })),
   category: t.Optional(categorySchema),
   price: t.Optional(priceSchema),
   condition: t.Optional(conditionSchema),
   zone: t.Optional(zoneSchema),
-  draftStep: t.Optional(t.Integer({ minimum: 1, maximum: 7 })),
-  imageUrls: t.Optional(t.Array(t.String({ format: "uri", maxLength: 2000 }), { maxItems: 10 })),
+  address: t.Optional(addressSchema),
+  latitude: t.Optional(latLngSchema.latitude),
+  longitude: t.Optional(latLngSchema.longitude),
+  imageUrls: t.Optional(t.Array(t.String({ format: "uri", maxLength: 2000 }), { minItems: 1, maxItems: 10 })),
 });
 
 const feedQuery = t.Object({
@@ -93,6 +112,12 @@ function findOwnedPublication(db: AppDatabase, publicationId: string, userId: st
 export function publicationRoutes(db: AppDatabase) {
   return new Elysia()
     .get("/categories", () => ({ items: categories }))
+    // Consigna 3 (Explorar Publicaciones / Home): listado paginado con título, precio, estado
+    // del artículo, zona y foto de portada; buscador de texto libre sobre título+descripción;
+    // filtros combinados por categoría, rango de precio, estado y zona; orden por recientes,
+    // menor o mayor precio. La "cercanía a la zona" se aproxima por coincidencia exacta de zona
+    // (no hay coordenadas del usuario en este modelo de dominio; con ellas se podría calcular
+    // distancia real igual que se hace con la dirección de la publicación).
     .get(
       "/publications",
       ({ query }) => {
@@ -155,12 +180,18 @@ export function publicationRoutes(db: AppDatabase) {
       },
       { query: feedQuery },
     )
+    // Consigna 4 (Detalle de la Publicación): galería completa, descripción, categoría, estado,
+    // precio y fecha de publicación; datos del vendedor con reputación y acceso a su perfil
+    // público; acciones según quién mira (interesado vs. dueño). La dirección exacta
+    // (`address`/`latitude`/`longitude`) se omite salvo que el que mira sea el vendedor o el
+    // comprador cuya oferta ya fue aceptada ("no se puede ver la dirección exacta hasta que no
+    // se efectúe [se acepte] la oferta del artículo").
     .get("/publications/:id", async ({ params, headers }) => {
       const publication = db.select().from(publications).where(eq(publications.id, params.id)).get();
       const viewer = await optionalUser(db, headers);
       const isOwner = !!viewer && viewer.id === publication?.sellerId;
-      // Los borradores y las pausadas solo son visibles para su vendedor.
-      if (!publication || (["draft", "paused"].includes(publication.status) && !isOwner))
+      // Las pausadas solo son visibles para su vendedor.
+      if (!publication || (publication.status === "paused" && !isOwner))
         throw new ApiError(404, "PUBLICATION_NOT_FOUND", "Publicación no encontrada");
 
       const questionRows = db
@@ -187,7 +218,8 @@ export function publicationRoutes(db: AppDatabase) {
           .get();
 
       const canInteract = !!viewer && !isOwner && publication.status === "active";
-      const { priceCents, ...rest } = publication;
+      const canViewAddress = isOwner || (!!viewer && hasAcceptedOffer(db, publication.id, viewer.id));
+      const { priceCents, address, latitude, longitude, ...rest } = publication;
       return {
         ...rest,
         price: priceFromCents(priceCents),
@@ -195,6 +227,12 @@ export function publicationRoutes(db: AppDatabase) {
         seller: getPublicUser(db, publication.sellerId),
         questions: questionRows,
         isFavorite,
+        // Consigna 8: una vez habilitada, incluye el link "Cómo llegar" a Google Maps.
+        address: canViewAddress ? address : null,
+        latitude: canViewAddress ? latitude : null,
+        longitude: canViewAddress ? longitude : null,
+        mapsUrl: canViewAddress && latitude != null && longitude != null ? buildDirectionsUrl(latitude, longitude) : null,
+        addressLocked: !canViewAddress,
         actions: {
           canAsk: canInteract,
           canOffer: canInteract,
@@ -203,35 +241,46 @@ export function publicationRoutes(db: AppDatabase) {
         },
       };
     })
+    // Consigna 5: "Carga guiada en pasos" (fotos, título, descripción, categoría, precio, estado
+    // y dirección exacta). El wizard y su borrador viven en el cliente Android ("si la persona
+    // interrumpe la carga y sale de la app, al volver encuentra el borrador conservado para
+    // retomarlo"); esta API recién se llama una vez, con la publicación completa, y queda activa
+    // de inmediato.
     .post(
-      "/publications/drafts",
+      "/publications",
       async ({ headers, body }) => {
         const user = await requireUser(db, headers);
         const id = crypto.randomUUID();
         const now = nowIso();
-        const draftStep = body.draftStep ?? 1;
         db.insert(publications)
           .values({
             id,
             sellerId: user.id,
-            title: body.title ?? "",
-            description: body.description ?? "",
-            category: body.category ?? null,
-            priceCents: centsFromPrice(body.price),
-            itemCondition: body.condition ?? null,
-            zone: body.zone ?? user.zone,
-            status: "draft",
-            draftStep,
+            title: body.title,
+            description: body.description,
+            category: body.category,
+            priceCents: centsFromPrice(body.price)!,
+            itemCondition: body.condition,
+            zone: body.zone,
+            address: body.address,
+            latitude: body.latitude,
+            longitude: body.longitude,
+            status: "active",
             publishedAt: now,
             createdAt: now,
             updatedAt: now,
           })
           .run();
-        if (body.imageUrls) replaceImages(db, id, body.imageUrls);
-        return { id, status: "draft", draftStep };
+        replaceImages(db, id, body.imageUrls);
+
+        const created = db.select().from(publications).where(eq(publications.id, id)).get()!;
+        notifySavedSearches(db, created);
+        return { ...created, images: listImages(db, id) };
       },
-      { body: publicationBody },
+      { body: createPublicationBody },
     )
+    // Consigna 5: editar cualquier campo (incluida la dirección) de una publicación propia
+    // mientras no esté vendida.
     .patch(
       "/publications/:id",
       async ({ params, headers, body }) => {
@@ -240,7 +289,7 @@ export function publicationRoutes(db: AppDatabase) {
         if (current.status === "sold")
           throw new ApiError(409, "PUBLICATION_SOLD", "Una publicación vendida no se puede editar");
 
-        const priceCents = body.price === undefined ? current.priceCents : centsFromPrice(body.price);
+        const priceCents = body.price === undefined ? current.priceCents : centsFromPrice(body.price)!;
         db.update(publications)
           .set({
             title: body.title ?? current.title,
@@ -249,7 +298,9 @@ export function publicationRoutes(db: AppDatabase) {
             priceCents,
             itemCondition: body.condition ?? current.itemCondition,
             zone: body.zone ?? current.zone,
-            draftStep: body.draftStep ?? current.draftStep,
+            address: body.address ?? current.address,
+            latitude: body.latitude ?? current.latitude,
+            longitude: body.longitude ?? current.longitude,
             updatedAt: nowIso(),
           })
           .where(eq(publications.id, params.id))
@@ -262,29 +313,9 @@ export function publicationRoutes(db: AppDatabase) {
         const updated = db.select().from(publications).where(eq(publications.id, params.id)).get()!;
         return { ...updated, images: listImages(db, params.id) };
       },
-      { body: publicationBody },
+      { body: updatePublicationBody },
     )
-    .post("/publications/:id/publish", async ({ params, headers }) => {
-      const user = await requireUser(db, headers);
-      const publication = findOwnedPublication(db, params.id, user.id, "publicarla");
-      if (publication.status !== "draft")
-        throw new ApiError(409, "INVALID_STATUS", "Solo se puede publicar un borrador");
-
-      const missing = REQUIRED_TO_PUBLISH.filter(
-        (field) => publication[field] == null || publication[field] === "",
-      );
-      if (missing.length) throw new ApiError(400, "INCOMPLETE_DRAFT", `Faltan campos: ${missing.join(", ")}`);
-      if (listImages(db, params.id).length === 0)
-        throw new ApiError(400, "INCOMPLETE_DRAFT", "Debe haber al menos una imagen");
-
-      const now = nowIso();
-      db.update(publications)
-        .set({ status: "active", publishedAt: now, updatedAt: now })
-        .where(eq(publications.id, params.id))
-        .run();
-      notifySavedSearches(db, { ...publication, status: "active", publishedAt: now, updatedAt: now });
-      return { id: params.id, status: "active", publishedAt: now };
-    })
+    // Consigna 5: "Mis publicaciones" — pausar y reactivar.
     .patch(
       "/publications/:id/status",
       async ({ params, headers, body }) => {
@@ -304,6 +335,7 @@ export function publicationRoutes(db: AppDatabase) {
       },
       { body: t.Object({ status: t.Union([t.Literal("active"), t.Literal("paused")]) }) },
     )
+    // Consigna 5: "Sección 'Mis publicaciones' con el estado de cada una (activa, pausada, vendida)".
     .get(
       "/me/publications",
       async ({ headers, query }) => {
@@ -322,6 +354,8 @@ export function publicationRoutes(db: AppDatabase) {
       },
       { query: t.Object({ status: t.Optional(publicationStatusSchema) }) },
     )
+    // Consigna 5 (fotos del artículo) y consigna 2 (foto de perfil): storage genérico de imágenes,
+    // reutilizado por PATCH /me con la URL devuelta.
     .post(
       "/uploads/images",
       async ({ headers, body, request }) => {

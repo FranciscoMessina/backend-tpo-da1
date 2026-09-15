@@ -4,6 +4,7 @@ import { config } from "./config";
 import { createDatabase, type AppDatabase } from "./database";
 import { otpCodes, sessions } from "./db/schema";
 import { ApiError } from "./errors";
+import { expireStaleOffers } from "./queries";
 import { authRoutes } from "./routes/auth";
 import { interactionRoutes } from "./routes/interactions";
 import { publicationRoutes } from "./routes/publications";
@@ -16,6 +17,11 @@ const CORS_HEADERS = {
   "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "access-control-max-age": "600",
 };
+
+// Consigna 1 (desbloqueo por biometría) y consigna 6 (modo sin conexión) no tienen contraparte
+// en el backend: la biometría desbloquea localmente el token de sesión ya emitido (Android
+// BiometricPrompt + Keystore) y el caché offline vive en el dispositivo (Room/SQLite local).
+// Esta API ya expone todos los datos que ambos flujos necesitan cachear/proteger.
 
 /** Índice de rutas que devuelve `GET /docs`, agrupado por área funcional. */
 const ROUTE_INDEX = {
@@ -31,9 +37,8 @@ const ROUTE_INDEX = {
     "GET /categories",
     "GET /publications",
     "GET /publications/:id",
-    "POST /publications/drafts",
+    "POST /publications",
     "PATCH /publications/:id",
-    "POST /publications/:id/publish",
     "PATCH /publications/:id/status",
     "GET /me/publications",
     "POST /uploads/images",
@@ -52,7 +57,13 @@ const ROUTE_INDEX = {
     "DELETE /saved-searches/:id",
   ],
   questions: ["POST /publications/:id/questions", "POST /questions/:id/answer"],
-  offers: ["POST /publications/:id/offers", "POST /offers/:id/respond", "POST /offers/:id/cancel", "GET /me/offers"],
+  offers: [
+    "POST /publications/:id/offers",
+    "POST /offers/:id/respond",
+    "POST /offers/:id/respond-to-counter",
+    "POST /offers/:id/cancel",
+    "GET /me/offers",
+  ],
   operations: ["GET /me/operations", "POST /operations/:id/reviews"],
 };
 
@@ -61,6 +72,8 @@ function purgeExpiredRecords(db: AppDatabase) {
   const now = nowIso();
   db.delete(sessions).where(lte(sessions.expiresAt, now)).run();
   db.delete(otpCodes).where(lte(otpCodes.expiresAt, now)).run();
+  // Consigna 7: barrido de arranque; el vencimiento real ocurre de forma perezosa en cada request (ver queries.ts).
+  expireStaleOffers(db);
 }
 
 export function createApp(db: AppDatabase = createDatabase()) {

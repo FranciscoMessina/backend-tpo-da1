@@ -192,12 +192,16 @@ async function registerUser(db: AppDatabase, email: string, body: OtpVerify) {
 
 export function authRoutes(db: AppDatabase) {
   return new Elysia({ prefix: "/auth" })
+    // Consigna 1: "Solicitar email → enviar código de validación (OTP)".
     .post("/otp/request", ({ body }) => issueOtp(db, body), {
       body: otpRequestBody,
     })
+    // Consigna 1: "Recupero de acceso: reenviar el código en caso de no haberlo recibido o de
+    // que haya expirado" (misma lógica que /otp/request: invalida el anterior y emite uno nuevo).
     .post("/otp/resend", ({ body }) => issueOtp(db, body), {
       body: otpRequestBody,
     })
+    // Consigna 1: "confirmar y crear sesión" (registro) / login alternativo por OTP.
     .post(
       "/otp/verify",
       async ({ body }) => {
@@ -239,6 +243,7 @@ export function authRoutes(db: AppDatabase) {
       },
       { body: otpVerifyBody },
     )
+    // Consigna 1: "Login mediante usuario y contraseña".
     .post(
       "/login/password",
       async ({ body }) => {

@@ -33,6 +33,11 @@ bun run db:generate
 bun run db:migrate
 ```
 
+> Si tu `data/marketplace.sqlite` es de antes de que se sacara el estado `draft` (commit que quitó
+> el borrador server-side), la migración que endurece `publications` a `NOT NULL` va a fallar
+> contra filas viejas incompletas. Como ese archivo es local y no se versiona, lo más simple es
+> borrarlo y volver a correr `db:migrate` + `db:seed`.
+
 Para inspeccionar los datos visualmente:
 
 ```bash
@@ -85,25 +90,25 @@ Para entrar con OTP se usa `purpose: "login"`. También existe `POST /auth/login
 |---|---|---|
 | Auth | `POST /auth/otp/request`, `/auth/otp/resend`, `/auth/otp/verify` | Registro y acceso por código |
 | Auth | `POST /auth/login/password`, `POST /auth/logout` | Login tradicional y cierre de sesión |
-| Perfil | `GET /me`, `PATCH /me` | Perfil privado |
+| Perfil | `GET /me`, `PATCH /me` | Perfil privado (incluye `avatarUrl`) |
 | Perfil | `GET /users/:id` | Reputación, antigüedad y publicaciones activas |
 | Home | `GET /publications` | Paginación, texto, categoría, precio, condición, zona y orden |
 | Home | `GET /categories` | Categorías disponibles |
-| Detalle | `GET /publications/:id` | Galería, vendedor, preguntas y acciones disponibles |
-| Publicación | `POST /publications/drafts` | Crear un borrador persistente |
-| Publicación | `PATCH /publications/:id` | Guardar cualquier paso del borrador o editar una publicación |
-| Publicación | `POST /publications/:id/publish` | Validar y activar un borrador completo |
+| Detalle | `GET /publications/:id` | Galería, vendedor, preguntas y acciones disponibles; dirección oculta hasta que se acepta una oferta |
+| Publicación | `POST /publications` | Crear una publicación completa (queda activa de inmediato) |
+| Publicación | `PATCH /publications/:id` | Editar una publicación propia (incluida la dirección/coordenadas) |
 | Publicación | `PATCH /publications/:id/status` | Pausar o reactivar |
 | Publicación | `GET /me/publications` | Listar publicaciones propias por estado |
-| Imágenes | `POST /uploads/images`, `GET /uploads/:filename` | Subir y servir JPG, PNG o WebP de hasta 5 MB |
+| Imágenes | `POST /uploads/images`, `GET /uploads/:filename` | Subir y servir JPG, PNG o WebP de hasta 5 MB (fotos de publicación o de perfil) |
 | Favoritos | `POST/DELETE /publications/:id/favorite` | Agregar o quitar |
 | Favoritos | `GET /me/favorites`, `POST /me/favorites/read` | Listado e indicador por cambios de precio |
 | Búsquedas | `POST/GET /saved-searches` | Guardar filtros y ver novedades |
 | Búsquedas | `POST /saved-searches/:id/read`, `DELETE /saved-searches/:id` | Marcar como leída o eliminar |
 | Preguntas | `POST /publications/:id/questions`, `POST /questions/:id/answer` | Consulta y respuesta |
-| Ofertas | `POST /publications/:id/offers`, `POST /offers/:id/respond` | Ofertar y aceptar/rechazar |
-| Ofertas | `POST /offers/:id/cancel`, `GET /me/offers` | Cancelar una oferta propia y listar las propias |
-| Operaciones | `GET /me/operations`, `POST /operations/:id/reviews` | Historial y calificaciones |
+| Ofertas | `POST /publications/:id/offers`, `POST /offers/:id/respond` | Ofertar (con mensaje opcional) y aceptar/rechazar/contraofertar |
+| Ofertas | `POST /offers/:id/respond-to-counter` | El comprador acepta o rechaza la contraoferta del vendedor |
+| Ofertas | `POST /offers/:id/cancel`, `GET /me/offers` | Cancelar una oferta propia y listar las propias (vencen solas pasado su plazo) |
+| Operaciones | `GET /me/operations`, `POST /operations/:id/reviews` | Historial (filtrable por tipo y fecha, con link "Cómo llegar") y calificaciones (ventana de 7 días) |
 
 `GET /docs` devuelve este mismo índice en JSON.
 
@@ -113,18 +118,41 @@ Para entrar con OTP se usa `purpose: "login"`. También existe `POST /auth/login
 
 Las condiciones son `new`, `like_new` y `used`. Las categorías se consultan con `GET /categories`.
 
-## Borradores e imágenes
+## Alta guiada e imágenes
 
-Android puede subir cada foto como `multipart/form-data` a `POST /uploads/images` (campo `file`) y guardar las URLs devueltas en `imageUrls`. Cada `PATCH /publications/:id` persiste además `draftStep`, por lo que la app puede volver exactamente al paso pendiente.
+El paso a paso de la carga (fotos, título, descripción, categoría, precio, condición, zona y
+dirección) vive enteramente en la app Android: el borrador en progreso se guarda localmente en el
+dispositivo, así que si la persona sale de la app lo encuentra conservado al volver. El backend no
+tiene noción de borrador ni de pasos: recién recibe la publicación cuando está completa, vía
+`POST /publications`, y esta queda `active` de inmediato.
 
-Una publicación solo se activa si tiene título, descripción, categoría, precio, condición, zona y al menos una imagen.
+Android sube cada foto como `multipart/form-data` a `POST /uploads/images` (campo `file`) y guarda
+las URLs devueltas para mandarlas en `imageUrls` al crear o editar la publicación.
+
+`POST /publications` exige título, descripción, categoría, precio, condición, zona, dirección con
+coordenadas y al menos una imagen; si falta algo, la validación del body lo rechaza con 422 antes
+de tocar la base.
 
 ## Novedades y reputación
 
 - Si cambia el precio de una publicación favorita, `GET /me/favorites` devuelve `hasUpdate` y `priceChanged`.
 - Al publicar un artículo nuevo se incrementa `unreadCount` de cada búsqueda guardada compatible.
-- Aceptar una oferta marca el artículo como vendido, rechaza las demás ofertas pendientes y crea una operación.
-- Comprador y vendedor pueden calificar una vez por operación. El perfil público calcula promedio, cantidad de calificaciones, compras y ventas concretadas.
+- Aceptar una oferta (directa o tras una contraoferta) marca el artículo como vendido, rechaza las demás ofertas pendientes y crea una operación.
+- Comprador y vendedor pueden calificar una vez por operación, dentro de los 7 días de concretada. El perfil público calcula promedio, cantidad de calificaciones, compras y ventas concretadas.
+
+## Ofertas, dirección y mapa
+
+- Una oferta tiene un plazo de vigencia (`OFFER_TTL_DAYS`) y pasa a `expired` automáticamente al vencer; esto se aplica de forma perezosa cada vez que se lee o se actúa sobre una oferta (`expireStaleOffers` en `src/queries.ts`), además de en un barrido al arrancar la app.
+- El vendedor puede `accept`, `reject` o `counter` (con `counterAmount`) una oferta pendiente; si contraoferta, el comprador la resuelve en `POST /offers/:id/respond-to-counter`.
+- La dirección exacta de una publicación (`address`, `latitude`, `longitude`) solo se devuelve en `GET /publications/:id` al vendedor o al comprador cuya oferta ya fue aceptada; el resto ve `addressLocked: true` y los campos en `null`.
+- Cuando la dirección es visible, la respuesta incluye `mapsUrl`: un link de Google Maps en modo navegación listo para el botón "Cómo llegar" del cliente Android.
+
+## Biometría y modo sin conexión (consignas 1 y 6)
+
+Ambos flujos son responsabilidad del cliente Android y no requieren endpoints propios:
+
+- El desbloqueo por biometría protege localmente el token de sesión ya emitido (`BiometricPrompt` + Android Keystore); el backend sigue validando ese mismo token con `Authorization: Bearer`.
+- El modo sin conexión cachea en el dispositivo (por ejemplo con Room) las respuestas de `GET /publications` y `GET /publications/:id` ya recibidas, y deshabilita las acciones que requieren red mientras no haya conectividad.
 
 ## Configuración
 
@@ -134,6 +162,7 @@ Una publicación solo se activa si tiene título, descripción, categoría, prec
 | `DATABASE_PATH` | `data/marketplace.sqlite` | Archivo SQLite |
 | `OTP_TTL_MINUTES` | `10` | Vigencia del código |
 | `SESSION_DAYS` | `30` | Duración de la sesión |
+| `OFFER_TTL_DAYS` | `3` | Plazo de vigencia de una oferta antes de vencer |
 | `NODE_ENV` | `development` | En `production` oculta el OTP |
 
 Para producción conviene reemplazar el almacenamiento local de imágenes por S3/Cloudinary, conectar un proveedor de correo, restringir CORS al dominio de la app/API y servir todo detrás de HTTPS.

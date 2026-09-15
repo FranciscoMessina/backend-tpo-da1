@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
+// Consigna 2 (Perfil y Reputación): datos personales editables, incluida la foto de perfil.
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   email: text("email").notNull().unique(),
@@ -9,6 +10,7 @@ export const users = sqliteTable("users", {
   name: text("name").notNull(),
   phone: text("phone"),
   zone: text("zone"),
+  avatarUrl: text("avatar_url"),
   createdAt: text("created_at").notNull(),
   emailVerifiedAt: text("email_verified_at").notNull(),
 });
@@ -35,23 +37,32 @@ export const sessions = sqliteTable("sessions", {
   createdAt: text("created_at").notNull(),
 }, (table) => [index("idx_sessions_token").on(table.tokenHash)]);
 
+// Consigna 5 (Publicar un artículo): la dirección exacta se carga con coordenadas en el alta guiada.
+// Consigna 4/7 (Detalle / Ofertas): address/latitude/longitude solo se exponen al vendedor y al
+// comprador cuya oferta fue aceptada (ver `canViewAddress` en routes/publications.ts).
 export const publications = sqliteTable("publications", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  title: text("title").notNull().default(""),
-  description: text("description").notNull().default(""),
-  category: text("category"),
-  priceCents: integer("price_cents"),
-  itemCondition: text("item_condition", { enum: ["new", "like_new", "used"] }),
-  zone: text("zone"),
-  status: text("status", { enum: ["draft", "active", "paused", "sold"] }).notNull(),
-  draftStep: integer("draft_step").notNull().default(1),
-  publishedAt: text("published_at"),
+  // Ya no hay borrador server-side: una publicación siempre se crea completa, así que estos
+  // campos son obligatorios (a diferencia de cuando existía el estado "draft").
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  category: text("category").notNull(),
+  priceCents: integer("price_cents").notNull(),
+  itemCondition: text("item_condition", { enum: ["new", "like_new", "used"] }).notNull(),
+  zone: text("zone").notNull(),
+  address: text("address").notNull(),
+  latitude: real("latitude").notNull(),
+  longitude: real("longitude").notNull(),
+  // Sin estado "draft": el alta guiada vive en el cliente Android y solo llega al servidor
+  // cuando está completa, ya como "active" (ver POST /publications).
+  status: text("status", { enum: ["active", "paused", "sold"] }).notNull(),
+  publishedAt: text("published_at").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [
-  check("publication_condition_check", sql`${table.itemCondition} IS NULL OR ${table.itemCondition} IN ('new', 'like_new', 'used')`),
-  check("publication_status_check", sql`${table.status} IN ('draft', 'active', 'paused', 'sold')`),
+  check("publication_condition_check", sql`${table.itemCondition} IN ('new', 'like_new', 'used')`),
+  check("publication_status_check", sql`${table.status} IN ('active', 'paused', 'sold')`),
   index("idx_publications_feed").on(table.status, table.publishedAt),
   index("idx_publications_seller").on(table.sellerId, table.status),
 ]);
@@ -97,15 +108,27 @@ export const questions = sqliteTable("questions", {
   answeredAt: text("answered_at"),
 });
 
+// Consigna 7 (Ofertas y Negociación): precio propuesto + mensaje opcional, contraoferta del
+// vendedor (counterAmountCents) y vencimiento automático (expiresAt + status "expired").
 export const offers = sqliteTable("offers", {
   id: text("id").primaryKey(),
   publicationId: text("publication_id").notNull().references(() => publications.id, { onDelete: "cascade" }),
   buyerId: text("buyer_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   amountCents: integer("amount_cents").notNull(),
-  status: text("status", { enum: ["pending", "accepted", "rejected", "cancelled"] }).notNull(),
+  message: text("message"),
+  counterAmountCents: integer("counter_amount_cents"),
+  status: text("status", {
+    enum: ["pending", "countered", "accepted", "rejected", "expired", "cancelled"],
+  }).notNull(),
+  expiresAt: text("expires_at").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-}, (table) => [check("offer_status_check", sql`${table.status} IN ('pending', 'accepted', 'rejected', 'cancelled')`)]);
+}, (table) => [
+  check(
+    "offer_status_check",
+    sql`${table.status} IN ('pending', 'countered', 'accepted', 'rejected', 'expired', 'cancelled')`,
+  ),
+]);
 
 export const operations = sqliteTable("operations", {
   id: text("id").primaryKey(),

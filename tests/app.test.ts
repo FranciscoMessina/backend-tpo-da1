@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import { createApp } from "../src/app";
 import { createDatabase } from "../src/database";
 
@@ -34,9 +35,9 @@ async function register(email: string, name: string) {
   return { id: verified.data.userId as string, token: verified.data.session.token as string };
 }
 
-/** Crea un borrador completo y lo publica. Devuelve el id de la publicación activa. */
+/** Crea una publicación completa (el alta guiada vive en el cliente, acá siempre se manda entera). Devuelve el id, ya activa. */
 async function publish(token: string, overrides: Record<string, unknown> = {}) {
-  const draft = await api("/publications/drafts", {
+  const created = await api("/publications", {
     method: "POST",
     token,
     body: {
@@ -46,15 +47,16 @@ async function publish(token: string, overrides: Record<string, unknown> = {}) {
       price: 450,
       condition: "like_new",
       zone: "Palermo",
-      draftStep: 7,
+      address: "Av. Santa Fe 3253, Palermo, CABA",
+      latitude: -34.5895,
+      longitude: -58.4173,
       imageUrls: ["https://images.example.com/bike.jpg"],
       ...overrides,
     },
   });
-  expect(draft.response.status).toBe(200);
-  const published = await api(`/publications/${draft.data.id}/publish`, { method: "POST", token });
-  expect(published.data.status).toBe("active");
-  return draft.data.id as string;
+  expect(created.response.status).toBe(200);
+  expect(created.data.status).toBe("active");
+  return created.data.id as string;
 }
 
 afterAll(() => db.$client.close());
@@ -231,5 +233,117 @@ describe("Marketplace API", () => {
     const withBadToken = await api("/me", { token: "no-existe" });
     expect(withBadToken.response.status).toBe(401);
     expect(withBadToken.data.error.code).toBe("INVALID_SESSION");
+  });
+
+  test("consigna 4/8: la dirección exacta se oculta hasta que se acepta la oferta", async () => {
+    const seller = await register("address-seller@example.com", "Address Seller");
+    const buyer = await register("address-buyer@example.com", "Address Buyer");
+    const stranger = await register("address-stranger@example.com", "Address Stranger");
+    const publicationId = await publish(seller.token, { title: "Sommier dos plazas", category: "home" });
+
+    const asStranger = await api(`/publications/${publicationId}`, { token: stranger.token });
+    expect(asStranger.data.addressLocked).toBe(true);
+    expect(asStranger.data.address).toBeNull();
+    expect(asStranger.data.mapsUrl).toBeNull();
+
+    const asSeller = await api(`/publications/${publicationId}`, { token: seller.token });
+    expect(asSeller.data.addressLocked).toBe(false);
+    expect(asSeller.data.address).toBe("Av. Santa Fe 3253, Palermo, CABA");
+
+    const offer = await api(`/publications/${publicationId}/offers`, {
+      method: "POST",
+      token: buyer.token,
+      body: { amount: 100, message: "¿Cerramos en 100?" },
+    });
+    expect(offer.data.message).toBe("¿Cerramos en 100?");
+
+    const beforeAccept = await api(`/publications/${publicationId}`, { token: buyer.token });
+    expect(beforeAccept.data.addressLocked).toBe(true);
+
+    await api(`/offers/${offer.data.id}/respond`, { method: "POST", token: seller.token, body: { action: "accept" } });
+
+    const afterAccept = await api(`/publications/${publicationId}`, { token: buyer.token });
+    expect(afterAccept.data.addressLocked).toBe(false);
+    expect(afterAccept.data.address).toBe("Av. Santa Fe 3253, Palermo, CABA");
+    expect(afterAccept.data.mapsUrl).toContain("destination=");
+  });
+
+  test("consigna 7: el vendedor contraoferta y el comprador la acepta, cerrando la venta al nuevo precio", async () => {
+    const seller = await register("counter-seller@example.com", "Counter Seller");
+    const buyer = await register("counter-buyer@example.com", "Counter Buyer");
+    const publicationId = await publish(seller.token, { title: "Heladera usada", category: "home", price: 500 });
+
+    const offer = await api(`/publications/${publicationId}/offers`, {
+      method: "POST",
+      token: buyer.token,
+      body: { amount: 400 },
+    });
+
+    const countered = await api(`/offers/${offer.data.id}/respond`, {
+      method: "POST",
+      token: seller.token,
+      body: { action: "counter", counterAmount: 450 },
+    });
+    expect(countered.data.status).toBe("countered");
+
+    // El vendedor ya no puede volver a responder la oferta original: espera al comprador.
+    const secondAttempt = await api(`/offers/${offer.data.id}/respond`, {
+      method: "POST",
+      token: seller.token,
+      body: { action: "accept" },
+    });
+    expect(secondAttempt.response.status).toBe(409);
+
+    const accepted = await api(`/offers/${offer.data.id}/respond-to-counter`, {
+      method: "POST",
+      token: buyer.token,
+      body: { action: "accept" },
+    });
+    expect(accepted.data.status).toBe("accepted");
+
+    const operations = await api("/me/operations", { token: buyer.token });
+    expect(operations.data.items[0].amount).toBe(450);
+    expect(operations.data.items[0].type).toBe("buy");
+  });
+
+  test("consigna 9: no se puede calificar pasados los 7 días de la entrega", async () => {
+    const seller = await register("late-review-seller@example.com", "Late Seller");
+    const buyer = await register("late-review-buyer@example.com", "Late Buyer");
+    const publicationId = await publish(seller.token, { title: "Ventilador de pie", category: "home", price: 80 });
+
+    const offer = await api(`/publications/${publicationId}/offers`, {
+      method: "POST",
+      token: buyer.token,
+      body: { amount: 80 },
+    });
+    const accepted = await api(`/offers/${offer.data.id}/respond`, {
+      method: "POST",
+      token: seller.token,
+      body: { action: "accept" },
+    });
+
+    const eightDaysAgo = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    db.run(sql`UPDATE operations SET completed_at = ${eightDaysAgo} WHERE id = ${accepted.data.operationId}`);
+
+    const review = await api(`/operations/${accepted.data.operationId}/reviews`, {
+      method: "POST",
+      token: buyer.token,
+      body: { rating: 5 },
+    });
+    expect(review.response.status).toBe(409);
+    expect(review.data.error.code).toBe("REVIEW_WINDOW_EXPIRED");
+  });
+
+  test("consigna 2: el perfil se puede editar con foto de perfil", async () => {
+    const user = await register("avatar-user@example.com", "Avatar User");
+    const updated = await api("/me", {
+      method: "PATCH",
+      token: user.token,
+      body: { avatarUrl: "https://example.com/avatar.jpg" },
+    });
+    expect(updated.data.avatarUrl).toBe("https://example.com/avatar.jpg");
+
+    const me = await api("/me", { token: user.token });
+    expect(me.data.avatarUrl).toBe("https://example.com/avatar.jpg");
   });
 });

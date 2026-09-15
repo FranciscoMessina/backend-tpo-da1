@@ -19,6 +19,8 @@ export const config = {
   databasePath: Bun.env.DATABASE_PATH ?? "data/marketplace.sqlite",
   otpTtlMinutes: envNumber("OTP_TTL_MINUTES", 10),
   sessionDays: envNumber("SESSION_DAYS", 30),
+  // Consigna 7: plazo de vigencia de una oferta antes de que caduque automáticamente.
+  offerTtlDays: envNumber("OFFER_TTL_DAYS", 3),
   nodeEnv,
   isProduction: nodeEnv === "production",
 } as const;

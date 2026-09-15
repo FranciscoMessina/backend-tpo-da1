@@ -2,7 +2,9 @@ import { t } from "elysia";
 
 export const categories = ["electronics", "home", "fashion", "sports", "vehicles", "books", "toys", "other"] as const;
 export const conditions = ["new", "like_new", "used"] as const;
-export const publicationStatuses = ["draft", "active", "paused", "sold"] as const;
+// Sin estado "draft": el borrador en progreso vive solo en el dispositivo (app nativa);
+// el servidor recién ve la publicación cuando se envía completa y queda activa.
+export const publicationStatuses = ["active", "paused", "sold"] as const;
 export const sortOptions = ["recent", "price_asc", "price_desc"] as const;
 
 export type Category = (typeof categories)[number];

@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { createDatabase } from "../database";
 import {
   favorites,
@@ -13,21 +14,35 @@ import {
 
 const db = createDatabase();
 
+// Como los IDs ahora son UUIDs generados en cada corrida (no strings fijos), no se puede confiar
+// en `onConflictDoNothing` por id para que reinsertar el seed sea un no-op: se chequea acá con un
+// dato natural (el email) si el seed ya se aplicó antes.
+const alreadySeeded = db.select({ id: users.id }).from(users).where(eq(users.email, "ana@example.com")).get();
+if (alreadySeeded) {
+  console.log("Seed ya aplicado (existe ana@example.com); no se modifica nada.");
+  db.$client.close();
+  process.exit(0);
+}
+
+// Los IDs de todas las entidades son UUIDs generados en runtime (no strings fijos), tal como
+// se pide para el resto de la aplicación; se guardan en este mapa solo para poder referenciarlos
+// entre sí dentro del propio seed.
 const ids = {
-  ana: "seed-user-ana",
-  bruno: "seed-user-bruno",
-  carla: "seed-user-carla",
-  bike: "seed-publication-bike",
-  notebook: "seed-publication-notebook",
-  chair: "seed-publication-chair",
-  phone: "seed-publication-phone",
-  guitar: "seed-publication-guitar",
-  bikeOffer: "seed-offer-bike",
-  phoneOffer: "seed-offer-phone",
-  phoneOperation: "seed-operation-phone",
-} as const;
+  ana: crypto.randomUUID(),
+  bruno: crypto.randomUUID(),
+  carla: crypto.randomUUID(),
+  bike: crypto.randomUUID(),
+  notebook: crypto.randomUUID(),
+  chair: crypto.randomUUID(),
+  phone: crypto.randomUUID(),
+  guitar: crypto.randomUUID(),
+  bikeOffer: crypto.randomUUID(),
+  phoneOffer: crypto.randomUUID(),
+  phoneOperation: crypto.randomUUID(),
+};
 
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
 
 try {
   const passwordHash = await Bun.password.hash("password123");
@@ -43,6 +58,7 @@ try {
           name: "Ana Gómez",
           phone: "+54 11 5555-0101",
           zone: "Palermo",
+          avatarUrl: "https://images.unsplash.com/photo-1494790108377-be9c29b29330",
           createdAt: daysAgo(180),
           emailVerifiedAt: daysAgo(180),
         },
@@ -54,6 +70,7 @@ try {
           name: "Bruno Díaz",
           phone: "+54 11 5555-0102",
           zone: "Caballito",
+          avatarUrl: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e",
           createdAt: daysAgo(120),
           emailVerifiedAt: daysAgo(120),
         },
@@ -65,6 +82,7 @@ try {
           name: "Carla Ruiz",
           phone: "+54 11 5555-0103",
           zone: "Belgrano",
+          avatarUrl: "https://images.unsplash.com/photo-1517841905240-472988babdf9",
           createdAt: daysAgo(75),
           emailVerifiedAt: daysAgo(75),
         },
@@ -83,8 +101,10 @@ try {
           priceCents: 450_000,
           itemCondition: "like_new",
           zone: "Palermo",
+          address: "Av. Santa Fe 3253, Palermo, CABA",
+          latitude: -34.5895,
+          longitude: -58.4173,
           status: "active",
-          draftStep: 7,
           publishedAt: daysAgo(5),
           createdAt: daysAgo(6),
           updatedAt: daysAgo(2),
@@ -98,8 +118,10 @@ try {
           priceCents: 780_000,
           itemCondition: "used",
           zone: "Belgrano",
+          address: "Av. Cabildo 2085, Belgrano, CABA",
+          latitude: -34.5623,
+          longitude: -58.4562,
           status: "active",
-          draftStep: 7,
           publishedAt: daysAgo(2),
           createdAt: daysAgo(3),
           updatedAt: daysAgo(2),
@@ -113,8 +135,10 @@ try {
           priceCents: 185_000,
           itemCondition: "like_new",
           zone: "Palermo",
+          address: "Av. Santa Fe 3253, Palermo, CABA",
+          latitude: -34.5895,
+          longitude: -58.4173,
           status: "paused",
-          draftStep: 7,
           publishedAt: daysAgo(15),
           createdAt: daysAgo(16),
           updatedAt: daysAgo(1),
@@ -128,8 +152,10 @@ try {
           priceCents: 320_000,
           itemCondition: "used",
           zone: "Belgrano",
+          address: "Av. Cabildo 2085, Belgrano, CABA",
+          latitude: -34.5623,
+          longitude: -58.4562,
           status: "sold",
-          draftStep: 7,
           publishedAt: daysAgo(30),
           createdAt: daysAgo(31),
           updatedAt: daysAgo(10),
@@ -138,14 +164,16 @@ try {
           id: ids.guitar,
           sellerId: ids.bruno,
           title: "Guitarra criolla",
-          description: "Borrador de una guitarra con funda incluida.",
+          description: "Guitarra con funda incluida, ideal para arrancar.",
           category: "other",
           priceCents: 210_000,
           itemCondition: "used",
           zone: "Caballito",
-          status: "draft",
-          draftStep: 4,
-          publishedAt: null,
+          address: "Av. Rivadavia 5401, Caballito, CABA",
+          latitude: -34.6178,
+          longitude: -58.4386,
+          status: "paused",
+          publishedAt: daysAgo(1),
           createdAt: daysAgo(1),
           updatedAt: daysAgo(1),
         },
@@ -155,11 +183,11 @@ try {
 
     tx.insert(publicationImages)
       .values([
-        { id: "seed-image-bike-1", publicationId: ids.bike, url: "https://images.unsplash.com/photo-1571068316344-75bc76f77890", position: 0 },
-        { id: "seed-image-bike-2", publicationId: ids.bike, url: "https://images.unsplash.com/photo-1558981806-ec527fa84c39", position: 1 },
-        { id: "seed-image-notebook", publicationId: ids.notebook, url: "https://images.unsplash.com/photo-1496181133206-80ce9b88a853", position: 0 },
-        { id: "seed-image-chair", publicationId: ids.chair, url: "https://images.unsplash.com/photo-1505797149-43b0069ec26b", position: 0 },
-        { id: "seed-image-phone", publicationId: ids.phone, url: "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9", position: 0 },
+        { id: crypto.randomUUID(), publicationId: ids.bike, url: "https://images.unsplash.com/photo-1571068316344-75bc76f77890", position: 0 },
+        { id: crypto.randomUUID(), publicationId: ids.bike, url: "https://images.unsplash.com/photo-1558981806-ec527fa84c39", position: 1 },
+        { id: crypto.randomUUID(), publicationId: ids.notebook, url: "https://images.unsplash.com/photo-1496181133206-80ce9b88a853", position: 0 },
+        { id: crypto.randomUUID(), publicationId: ids.chair, url: "https://images.unsplash.com/photo-1505797149-43b0069ec26b", position: 0 },
+        { id: crypto.randomUUID(), publicationId: ids.phone, url: "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9", position: 0 },
       ])
       .onConflictDoNothing()
       .run();
@@ -174,7 +202,7 @@ try {
 
     tx.insert(savedSearches)
       .values({
-        id: "seed-search-bruno-bikes",
+        id: crypto.randomUUID(),
         userId: ids.bruno,
         name: "Bicicletas cerca",
         queryText: "bicicleta",
@@ -194,7 +222,7 @@ try {
     tx.insert(questions)
       .values([
         {
-          id: "seed-question-bike",
+          id: crypto.randomUUID(),
           publicationId: ids.bike,
           askerId: ids.bruno,
           text: "¿Incluye luces y guardabarros?",
@@ -203,7 +231,7 @@ try {
           answeredAt: daysAgo(3),
         },
         {
-          id: "seed-question-notebook",
+          id: crypto.randomUUID(),
           publicationId: ids.notebook,
           askerId: ids.ana,
           text: "¿Cuánto dura la batería?",
@@ -222,7 +250,10 @@ try {
           publicationId: ids.bike,
           buyerId: ids.bruno,
           amountCents: 420_000,
+          message: "¿Aceptás este precio? Puedo pasar a buscarla el finde.",
+          counterAmountCents: null,
           status: "pending",
+          expiresAt: daysFromNow(2),
           createdAt: daysAgo(1),
           updatedAt: daysAgo(1),
         },
@@ -231,7 +262,10 @@ try {
           publicationId: ids.phone,
           buyerId: ids.bruno,
           amountCents: 300_000,
+          message: null,
+          counterAmountCents: null,
           status: "accepted",
+          expiresAt: daysAgo(9),
           createdAt: daysAgo(12),
           updatedAt: daysAgo(10),
         },
@@ -255,7 +289,7 @@ try {
     tx.insert(reviews)
       .values([
         {
-          id: "seed-review-phone-buyer",
+          id: crypto.randomUUID(),
           operationId: ids.phoneOperation,
           reviewerId: ids.bruno,
           reviewedUserId: ids.carla,
@@ -264,7 +298,7 @@ try {
           createdAt: daysAgo(9),
         },
         {
-          id: "seed-review-phone-seller",
+          id: crypto.randomUUID(),
           operationId: ids.phoneOperation,
           reviewerId: ids.carla,
           reviewedUserId: ids.bruno,
