@@ -21,15 +21,28 @@ async function api(path: string, options: { method?: string; token?: string; bod
   return { response, data };
 }
 
-async function register(email: string, name: string) {
-  const requested = await api("/auth/otp/request", {
-    method: "POST",
-    body: { email, purpose: "registration" },
-  });
+/** El código ya no viaja en la respuesta HTTP: se loguea por consola (dev), así que lo interceptamos. */
+async function requestOtp(email: string, purpose: "registration" | "login" | "set_password") {
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  let requested: Awaited<ReturnType<typeof api>>;
+  try {
+    requested = await api("/auth/otp/request", { method: "POST", body: { email, purpose } });
+  } finally {
+    console.log = originalLog;
+  }
   expect(requested.response.status).toBe(200);
+  const code = logs.join("\n").match(/\b(\d{6})\b/)?.[1];
+  if (!code) throw new Error(`No se logueó el código OTP para ${email}`);
+  return code;
+}
+
+async function register(email: string, name: string, password = "password123") {
+  const code = await requestOtp(email, "registration");
   const verified = await api("/auth/otp/verify", {
     method: "POST",
-    body: { email, purpose: "registration", code: requested.data.devCode, name, password: "password123" },
+    body: { email, purpose: "registration", code, name, password },
   });
   expect(verified.response.status).toBe(200);
   return { id: verified.data.userId as string, token: verified.data.session.token as string };
@@ -345,5 +358,45 @@ describe("Marketplace API", () => {
 
     const me = await api("/me", { token: user.token });
     expect(me.data.avatarUrl).toBe("https://example.com/avatar.jpg");
+  });
+
+  test("registro sin contraseña: se puede agregar después vía OTP y luego loguearse con ella", async () => {
+    const email = "no-password-user@example.com";
+    const registerCode = await requestOtp(email, "registration");
+    const registered = await api("/auth/otp/verify", {
+      method: "POST",
+      body: { email, purpose: "registration", code: registerCode, name: "No Password" },
+    });
+    expect(registered.response.status).toBe(200);
+
+    // Sin contraseña todavía no puede loguearse por password.
+    const failedLogin = await api("/auth/login/password", {
+      method: "POST",
+      body: { email, password: "newpassword123" },
+    });
+    expect(failedLogin.response.status).toBe(401);
+
+    // El código no se consume si falla por falta de password, así que se puede reintentar con el mismo.
+    const setPasswordCode = await requestOtp(email, "set_password");
+    const withoutPassword = await api("/auth/otp/verify", {
+      method: "POST",
+      body: { email, purpose: "set_password", code: setPasswordCode },
+    });
+    expect(withoutPassword.response.status).toBe(422);
+    expect(withoutPassword.data.error.code).toBe("PASSWORD_REQUIRED");
+
+    const setPassword = await api("/auth/otp/verify", {
+      method: "POST",
+      body: { email, purpose: "set_password", code: setPasswordCode, password: "newpassword123" },
+    });
+    expect(setPassword.response.status).toBe(200);
+    expect(setPassword.data.userId).toBe(registered.data.userId);
+
+    const login = await api("/auth/login/password", {
+      method: "POST",
+      body: { email, password: "newpassword123" },
+    });
+    expect(login.response.status).toBe(200);
+    expect(login.data.userId).toBe(registered.data.userId);
   });
 });

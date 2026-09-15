@@ -18,14 +18,14 @@ export const users = sqliteTable("users", {
 export const otpCodes = sqliteTable("otp_codes", {
   id: text("id").primaryKey(),
   email: text("email").notNull(),
-  purpose: text("purpose", { enum: ["registration", "login"] }).notNull(),
+  purpose: text("purpose", { enum: ["registration", "login", "set_password"] }).notNull(),
   codeHash: text("code_hash").notNull(),
   attempts: integer("attempts").notNull().default(0),
   expiresAt: text("expires_at").notNull(),
   consumedAt: text("consumed_at"),
   createdAt: text("created_at").notNull(),
 }, (table) => [
-  check("otp_purpose_check", sql`${table.purpose} IN ('registration', 'login')`),
+  check("otp_purpose_check", sql`${table.purpose} IN ('registration', 'login', 'set_password')`),
   index("idx_otp_email_purpose").on(table.email, table.purpose, table.createdAt),
 ]);
 

@@ -16,7 +16,11 @@ import { normalizeEmail, nowIso } from "../utils";
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_RESEND_COOLDOWN_MS = 30_000;
 
-const purposeSchema = t.Union([t.Literal("registration"), t.Literal("login")]);
+const purposeSchema = t.Union([
+  t.Literal("registration"),
+  t.Literal("login"),
+  t.Literal("set_password"),
+]);
 
 const otpRequestBody = t.Object({
   email: t.String({ format: "email", maxLength: 254 }),
@@ -44,7 +48,7 @@ const sixDigitCode = () =>
 
 /**
  * Emite un OTP nuevo e invalida los anteriores del mismo email y propósito.
- * Fuera de producción el código viaja en la respuesta (`devCode`) porque todavía no hay envío de email.
+ * Todavía no hay envío de email: fuera de producción el código se loguea por consola.
  */
 async function issueOtp(db: AppDatabase, body: OtpRequest) {
   const email = normalizeEmail(body.email);
@@ -59,7 +63,7 @@ async function issueOtp(db: AppDatabase, body: OtpRequest) {
       "EMAIL_ALREADY_REGISTERED",
       "El email ya está registrado",
     );
-  if (body.purpose === "login" && !existing)
+  if ((body.purpose === "login" || body.purpose === "set_password") && !existing)
     throw new ApiError(
       404,
       "USER_NOT_FOUND",
@@ -109,11 +113,10 @@ async function issueOtp(db: AppDatabase, body: OtpRequest) {
     })
     .run();
 
-  return {
-    message: "Código enviado",
-    expiresAt,
-    ...(config.isProduction ? {} : { devCode: code }),
-  };
+  // Todavía no hay envío de email: fuera de producción el código se loguea por consola.
+  if (!config.isProduction) console.log(`[OTP] ${body.purpose} ${email}: ${code}`);
+
+  return { message: "Código enviado", expiresAt };
 }
 
 /** Valida el último OTP vigente del email. Devuelve su id para consumirlo recién al final del flujo. */
@@ -202,6 +205,8 @@ export function authRoutes(db: AppDatabase) {
       body: otpRequestBody,
     })
     // Consigna 1: "confirmar y crear sesión" (registro) / login alternativo por OTP.
+    // También se reusa para agregarle contraseña a una cuenta que se registró sin una
+    // (purpose "set_password"): el OTP prueba que el email sigue siendo del dueño de la cuenta.
     .post(
       "/otp/verify",
       async ({ body }) => {
@@ -222,6 +227,24 @@ export function authRoutes(db: AppDatabase) {
               "El email ya está registrado",
             );
           userId = await registerUser(db, email, body);
+        } else if (body.purpose === "set_password") {
+          if (!existing)
+            throw new ApiError(
+              404,
+              "USER_NOT_FOUND",
+              "No existe una cuenta con ese email",
+            );
+          if (!body.password)
+            throw new ApiError(
+              422,
+              "PASSWORD_REQUIRED",
+              "Falta la contraseña a guardar",
+            );
+          db.update(users)
+            .set({ passwordHash: await Bun.password.hash(body.password) })
+            .where(eq(users.id, existing.id))
+            .run();
+          userId = existing.id;
         } else {
           if (!existing)
             throw new ApiError(
