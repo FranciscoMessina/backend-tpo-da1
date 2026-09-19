@@ -1,12 +1,12 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 import { Elysia, t } from "elysia";
 import { requireUser } from "../auth";
 import type { AppDatabase } from "../database";
-import { publications, users } from "../db/schema";
+import { operations, publications, reviews, users } from "../db/schema";
 import { ApiError } from "../errors";
 import { getCoverImages, getPublicUser } from "../queries";
 import { zoneSchema } from "../types";
-import { normalizeEmail, priceFromCents } from "../utils";
+import { normalizeEmail, parsePositiveInt, priceFromCents } from "../utils";
 
 const profileColumns = {
   id: users.id,
@@ -33,7 +33,16 @@ export function userRoutes(db: AppDatabase) {
     // Consigna 2: "Ver ... los datos personales" + reputación propia.
     .get("/me", async ({ headers }) => {
       const user = await requireUser(db, headers);
-      return { ...user, reputation: getPublicUser(db, user.id) };
+      const credentials = db
+        .select({ passwordHash: users.passwordHash })
+        .from(users)
+        .where(eq(users.id, user.id))
+        .get()!;
+      return {
+        ...user,
+        hasPassword: credentials.passwordHash !== null,
+        reputation: getPublicUser(db, user.id),
+      };
     })
     // Consigna 2: "editar los datos personales: nombre, email, teléfono de contacto, zona y foto de perfil".
     .patch(
@@ -78,10 +87,11 @@ export function userRoutes(db: AppDatabase) {
           title: publications.title,
           priceCents: publications.priceCents,
           itemCondition: publications.itemCondition,
-          zone: publications.zone,
+          zone: users.zone,
           publishedAt: publications.publishedAt,
         })
         .from(publications)
+        .innerJoin(users, eq(users.id, publications.sellerId))
         .where(and(eq(publications.sellerId, params.id), eq(publications.status, "active")))
         .orderBy(desc(publications.publishedAt))
         .all();
@@ -93,5 +103,44 @@ export function userRoutes(db: AppDatabase) {
         coverImage: covers.get(row.id) ?? null,
       }));
       return { ...profile, activePublications };
-    });
+    })
+    // Consigna 2: las calificaciones recibidas quedan visibles en el perfil público, paginadas.
+    // `operationType` es el rol del calificado en la operación: "sell" si lo calificaron como vendedor, "buy" como comprador.
+    .get(
+      "/users/:id/reviews",
+      ({ params, query }) => {
+        if (!db.select({ id: users.id }).from(users).where(eq(users.id, params.id)).get())
+          throw new ApiError(404, "USER_NOT_FOUND", "Usuario no encontrado");
+
+        const page = parsePositiveInt(query.page, 1, 10_000);
+        const pageSize = parsePositiveInt(query.pageSize, 20, 50);
+        const where = eq(reviews.reviewedUserId, params.id);
+
+        const total = db.select({ value: count() }).from(reviews).where(where).get()?.value ?? 0;
+        const rows = db
+          .select({
+            id: reviews.id,
+            rating: reviews.rating,
+            comment: reviews.comment,
+            createdAt: reviews.createdAt,
+            reviewerName: users.name,
+            sellerId: operations.sellerId,
+          })
+          .from(reviews)
+          .innerJoin(users, eq(users.id, reviews.reviewerId))
+          .innerJoin(operations, eq(operations.id, reviews.operationId))
+          .where(where)
+          .orderBy(desc(reviews.createdAt), desc(reviews.id))
+          .limit(pageSize)
+          .offset((page - 1) * pageSize)
+          .all();
+
+        const items = rows.map(({ sellerId, ...row }) => ({
+          ...row,
+          operationType: sellerId === params.id ? "sell" : "buy",
+        }));
+        return { items, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } };
+      },
+      { query: t.Object({ page: t.Optional(t.String()), pageSize: t.Optional(t.String()) }) },
+    );
 }

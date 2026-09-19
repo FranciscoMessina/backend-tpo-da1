@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ne, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, ne, sql, type SQL } from "drizzle-orm";
 import { Elysia, t } from "elysia";
 import { mkdirSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -14,9 +14,8 @@ import {
   priceSchema,
   publicationStatusSchema,
   sortSchema,
-  zoneSchema,
 } from "../types";
-import { buildDirectionsUrl, centsFromPrice, nowIso, parsePositiveInt, priceFromCents } from "../utils";
+import { centsFromPrice, nowIso, parsePositiveInt, priceFromCents } from "../utils";
 
 type Publication = typeof publications.$inferSelect;
 type SavedSearch = typeof savedSearches.$inferSelect;
@@ -35,18 +34,14 @@ const UPLOAD_FILENAME_PATTERN = /^[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i;
 // llama a la API una vez completo. Por eso acá no hay estado "draft" ni `draftStep`: todos estos
 // campos son obligatorios tanto para crear como para editar una publicación.
 const addressSchema = t.String({ minLength: 3, maxLength: 200 });
-const latLngSchema = { latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) };
-
 const createPublicationBody = t.Object({
   title: t.String({ minLength: 3, maxLength: 120 }),
   description: t.String({ minLength: 10, maxLength: 5000 }),
   category: categorySchema,
   price: priceSchema,
   condition: conditionSchema,
-  zone: zoneSchema,
-  // Consigna 5: "dirección exacta (cargar coordenadas)".
+  // La zona se toma del perfil del usuario autenticado.
   address: addressSchema,
-  ...latLngSchema,
   imageUrls: t.Array(t.String({ format: "uri", maxLength: 2000 }), { minItems: 1, maxItems: 10 }),
 });
 
@@ -56,10 +51,7 @@ const updatePublicationBody = t.Object({
   category: t.Optional(categorySchema),
   price: t.Optional(priceSchema),
   condition: t.Optional(conditionSchema),
-  zone: t.Optional(zoneSchema),
   address: t.Optional(addressSchema),
-  latitude: t.Optional(latLngSchema.latitude),
-  longitude: t.Optional(latLngSchema.longitude),
   imageUrls: t.Optional(t.Array(t.String({ format: "uri", maxLength: 2000 }), { minItems: 1, maxItems: 10 })),
 });
 
@@ -75,21 +67,21 @@ const feedQuery = t.Object({
   sort: t.Optional(sortSchema),
 });
 
-function matchesSearch(search: SavedSearch, publication: Publication) {
+function matchesSearch(search: SavedSearch, publication: Publication, sellerZone: string | null) {
   const text = (search.queryText ?? "").toLowerCase();
   if (text && !`${publication.title} ${publication.description}`.toLowerCase().includes(text)) return false;
   if (search.category && search.category !== publication.category) return false;
   if (search.itemCondition && search.itemCondition !== publication.itemCondition) return false;
-  if (search.zone && search.zone.toLowerCase() !== publication.zone?.toLowerCase()) return false;
+  if (search.zone && search.zone.toLowerCase() !== sellerZone?.toLowerCase()) return false;
   if (search.minPriceCents != null && (publication.priceCents ?? 0) < search.minPriceCents) return false;
   if (search.maxPriceCents != null && (publication.priceCents ?? 0) > search.maxPriceCents) return false;
   return true;
 }
 
 /** Suma una novedad a cada búsqueda guardada (ajena) que matchee la publicación recién activada. */
-function notifySavedSearches(db: AppDatabase, publication: Publication) {
+function notifySavedSearches(db: AppDatabase, publication: Publication, sellerZone: string | null) {
   const searches = db.select().from(savedSearches).where(ne(savedSearches.userId, publication.sellerId)).all();
-  const matched = searches.filter((search) => matchesSearch(search, publication));
+  const matched = searches.filter((search) => matchesSearch(search, publication, sellerZone));
   if (matched.length === 0) return;
   db.transaction((tx) => {
     for (const search of matched) {
@@ -112,6 +104,18 @@ function findOwnedPublication(db: AppDatabase, publicationId: string, userId: st
 export function publicationRoutes(db: AppDatabase) {
   return new Elysia()
     .get("/categories", () => ({ items: categories }))
+    // Opciones reales para el filtro del feed: zonas de vendedores con publicaciones activas.
+    .get("/zones", () => {
+      const items = db
+        .selectDistinct({ zone: users.zone })
+        .from(publications)
+        .innerJoin(users, eq(users.id, publications.sellerId))
+        .where(and(eq(publications.status, "active"), isNotNull(users.zone)))
+        .all()
+        .map(({ zone }) => zone!)
+        .sort((left, right) => left.localeCompare(right, "es", { sensitivity: "base" }));
+      return { items };
+    })
     // Consigna 3 (Explorar Publicaciones / Home): listado paginado con título, precio, estado
     // del artículo, zona y foto de portada; buscador de texto libre sobre título+descripción;
     // filtros combinados por categoría, rango de precio, estado y zona; orden por recientes,
@@ -120,10 +124,11 @@ export function publicationRoutes(db: AppDatabase) {
     // distancia real igual que se hace con la dirección de la publicación).
     .get(
       "/publications",
-      ({ query }) => {
+      async ({ headers, query }) => {
         if (query.minPrice != null && query.maxPrice != null && query.minPrice > query.maxPrice)
           throw new ApiError(400, "INVALID_PRICE_RANGE", "El precio mínimo no puede superar al máximo");
 
+        const viewer = await optionalUser(db, headers);
         const page = parsePositiveInt(query.page, 1, 10_000);
         const pageSize = parsePositiveInt(query.pageSize, 20, 50);
 
@@ -136,7 +141,7 @@ export function publicationRoutes(db: AppDatabase) {
         }
         if (query.category) clauses.push(eq(publications.category, query.category));
         if (query.condition) clauses.push(eq(publications.itemCondition, query.condition));
-        if (query.zone) clauses.push(sql`lower(${publications.zone}) = lower(${query.zone})`);
+        if (query.zone) clauses.push(sql`lower(${users.zone}) = lower(${query.zone})`);
         if (query.minPrice != null) clauses.push(sql`${publications.priceCents} >= ${centsFromPrice(query.minPrice)}`);
         if (query.maxPrice != null) clauses.push(sql`${publications.priceCents} <= ${centsFromPrice(query.maxPrice)}`);
         const where = and(...clauses);
@@ -148,7 +153,13 @@ export function publicationRoutes(db: AppDatabase) {
               ? desc(publications.priceCents)
               : desc(publications.publishedAt);
 
-        const total = db.select({ value: count() }).from(publications).where(where).get()?.value ?? 0;
+        const total =
+          db
+            .select({ value: count() })
+            .from(publications)
+            .innerJoin(users, eq(users.id, publications.sellerId))
+            .where(where)
+            .get()?.value ?? 0;
         const rows = db
           .select({
             id: publications.id,
@@ -157,7 +168,7 @@ export function publicationRoutes(db: AppDatabase) {
             category: publications.category,
             priceCents: publications.priceCents,
             itemCondition: publications.itemCondition,
-            zone: publications.zone,
+            zone: users.zone,
             publishedAt: publications.publishedAt,
             sellerId: users.id,
             sellerName: users.name,
@@ -171,11 +182,34 @@ export function publicationRoutes(db: AppDatabase) {
           .all();
 
         const covers = getCoverImages(db, rows.map((row) => row.id));
-        const items = rows.map(({ priceCents, ...row }) => ({
-          ...row,
-          price: priceFromCents(priceCents),
-          coverImage: covers.get(row.id) ?? null,
-        }));
+        const favoriteIds = new Set(
+          viewer && rows.length > 0
+            ? db
+                .select({ publicationId: favorites.publicationId })
+                .from(favorites)
+                .where(
+                  and(eq(favorites.userId, viewer.id), inArray(favorites.publicationId, rows.map((row) => row.id))),
+                )
+                .all()
+                .map(({ publicationId }) => publicationId)
+            : [],
+        );
+        const items = rows.map(({ priceCents, ...row }) => {
+          const isOwner = !!viewer && row.sellerId === viewer.id;
+          const canInteract = !!viewer && !isOwner;
+          return {
+            ...row,
+            price: priceFromCents(priceCents),
+            coverImage: covers.get(row.id) ?? null,
+            isFavorite: favoriteIds.has(row.id),
+            actions: {
+              canAsk: canInteract,
+              canOffer: canInteract,
+              canFavorite: canInteract,
+              canManage: isOwner,
+            },
+          };
+        });
         return { items, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } };
       },
       { query: feedQuery },
@@ -183,7 +217,7 @@ export function publicationRoutes(db: AppDatabase) {
     // Consigna 4 (Detalle de la Publicación): galería completa, descripción, categoría, estado,
     // precio y fecha de publicación; datos del vendedor con reputación y acceso a su perfil
     // público; acciones según quién mira (interesado vs. dueño). La dirección exacta
-    // (`address`/`latitude`/`longitude`) se omite salvo que el que mira sea el vendedor o el
+    // (`address`) se omite salvo que el que mira sea el vendedor o el
     // comprador cuya oferta ya fue aceptada ("no se puede ver la dirección exacta hasta que no
     // se efectúe [se acepte] la oferta del artículo").
     .get("/publications/:id", async ({ params, headers }) => {
@@ -219,19 +253,16 @@ export function publicationRoutes(db: AppDatabase) {
 
       const canInteract = !!viewer && !isOwner && publication.status === "active";
       const canViewAddress = isOwner || (!!viewer && hasAcceptedOffer(db, publication.id, viewer.id));
-      const { priceCents, address, latitude, longitude, ...rest } = publication;
+      const { priceCents, address, ...rest } = publication;
       return {
         ...rest,
+        zone: getPublicUser(db, publication.sellerId)?.zone ?? null,
         price: priceFromCents(priceCents),
         images: listImages(db, params.id),
         seller: getPublicUser(db, publication.sellerId),
         questions: questionRows,
         isFavorite,
-        // Consigna 8: una vez habilitada, incluye el link "Cómo llegar" a Google Maps.
         address: canViewAddress ? address : null,
-        latitude: canViewAddress ? latitude : null,
-        longitude: canViewAddress ? longitude : null,
-        mapsUrl: canViewAddress && latitude != null && longitude != null ? buildDirectionsUrl(latitude, longitude) : null,
         addressLocked: !canViewAddress,
         actions: {
           canAsk: canInteract,
@@ -242,7 +273,7 @@ export function publicationRoutes(db: AppDatabase) {
       };
     })
     // Consigna 5: "Carga guiada en pasos" (fotos, título, descripción, categoría, precio, estado
-    // y dirección exacta). El wizard y su borrador viven en el cliente Android ("si la persona
+    // y dirección exacta). La zona se hereda del perfil. El wizard y su borrador viven en el cliente Android ("si la persona
     // interrumpe la carga y sale de la app, al volver encuentra el borrador conservado para
     // retomarlo"); esta API recién se llama una vez, con la publicación completa, y queda activa
     // de inmediato.
@@ -261,10 +292,7 @@ export function publicationRoutes(db: AppDatabase) {
             category: body.category,
             priceCents: centsFromPrice(body.price)!,
             itemCondition: body.condition,
-            zone: body.zone,
             address: body.address,
-            latitude: body.latitude,
-            longitude: body.longitude,
             status: "active",
             publishedAt: now,
             createdAt: now,
@@ -274,8 +302,8 @@ export function publicationRoutes(db: AppDatabase) {
         replaceImages(db, id, body.imageUrls);
 
         const created = db.select().from(publications).where(eq(publications.id, id)).get()!;
-        notifySavedSearches(db, created);
-        return { ...created, images: listImages(db, id) };
+        notifySavedSearches(db, created, user.zone);
+        return { ...created, zone: user.zone, images: listImages(db, id) };
       },
       { body: createPublicationBody },
     )
@@ -297,10 +325,7 @@ export function publicationRoutes(db: AppDatabase) {
             category: body.category ?? current.category,
             priceCents,
             itemCondition: body.condition ?? current.itemCondition,
-            zone: body.zone ?? current.zone,
             address: body.address ?? current.address,
-            latitude: body.latitude ?? current.latitude,
-            longitude: body.longitude ?? current.longitude,
             updatedAt: nowIso(),
           })
           .where(eq(publications.id, params.id))
@@ -311,7 +336,7 @@ export function publicationRoutes(db: AppDatabase) {
           db.update(favorites).set({ hasUpdate: true }).where(eq(favorites.publicationId, params.id)).run();
 
         const updated = db.select().from(publications).where(eq(publications.id, params.id)).get()!;
-        return { ...updated, images: listImages(db, params.id) };
+        return { ...updated, zone: user.zone, images: listImages(db, params.id) };
       },
       { body: updatePublicationBody },
     )
@@ -349,7 +374,7 @@ export function publicationRoutes(db: AppDatabase) {
           .where(where)
           .orderBy(desc(publications.updatedAt))
           .all()
-          .map((item) => ({ ...item, images: listImages(db, item.id) }));
+          .map((item) => ({ ...item, zone: user.zone, images: listImages(db, item.id) }));
         return { items };
       },
       { query: t.Object({ status: t.Optional(publicationStatusSchema) }) },
@@ -369,7 +394,7 @@ export function publicationRoutes(db: AppDatabase) {
         await Bun.write(join(UPLOADS_DIR, filename), body.file);
         return { url: new URL(`/uploads/${filename}`, request.url).toString() };
       },
-      { body: t.Object({ file: t.File({ type: "image", maxSize: "5m" }) }) },
+      { body: t.Object({ file: t.File({ type: "image", maxSize: "20m" }) }) },
     )
     .get("/uploads/:filename", ({ params }) => {
       // El nombre siempre lo generamos nosotros (uuid + extensión): cualquier otra cosa es path traversal.

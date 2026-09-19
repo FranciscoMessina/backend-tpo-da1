@@ -11,11 +11,3 @@ export function parsePositiveInt(value: string | undefined, fallback: number, ma
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
 }
-
-/**
- * Consigna 8 (Coordinación de la Entrega y Mapa): link de Google Maps con la dirección
- * precargada en modo navegación, para el botón "Cómo llegar" del cliente Android
- * (Intent.ACTION_VIEW con esta URL abre Google Maps o la app de mapas por defecto).
- */
-export const buildDirectionsUrl = (latitude: number, longitude: number) =>
-  `https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}&travelmode=driving`;

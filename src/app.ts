@@ -1,5 +1,5 @@
 import { lte } from "drizzle-orm";
-import { Elysia } from "elysia";
+import { Elysia, ElysiaCustomStatusResponse } from "elysia";
 import { config } from "./config";
 import { createDatabase, type AppDatabase } from "./database";
 import { otpCodes, sessions } from "./db/schema";
@@ -32,9 +32,10 @@ const ROUTE_INDEX = {
     "POST /auth/login/password",
     "POST /auth/logout",
   ],
-  profiles: ["GET /me", "PATCH /me", "GET /users/:id"],
+  profiles: ["GET /me", "PATCH /me", "GET /users/:id", "GET /users/:id/reviews"],
   publications: [
     "GET /categories",
+    "GET /zones",
     "GET /publications",
     "GET /publications/:id",
     "POST /publications",
@@ -62,9 +63,11 @@ const ROUTE_INDEX = {
     "POST /offers/:id/respond",
     "POST /offers/:id/respond-to-counter",
     "POST /offers/:id/cancel",
+    "GET /offers/:id",
     "GET /me/offers",
+    "POST /me/offers/read",
   ],
-  operations: ["GET /me/operations", "POST /operations/:id/reviews"],
+  operations: ["GET /me/operations", "GET /operations/:id", "POST /operations/:id/reviews"],
 };
 
 /** Descarta sesiones y códigos OTP vencidos: no aportan nada y sólo hacen crecer las tablas. */
@@ -76,6 +79,24 @@ function purgeExpiredRecords(db: AppDatabase) {
   expireStaleOffers(db);
 }
 
+function requestDetails(request: Request) {
+  const url = new URL(request.url);
+  return {
+    method: request.method,
+    path: url.pathname,
+    query: Object.fromEntries(url.searchParams),
+  };
+}
+
+function logResponse(request: Request, statusCode: number | string, response: unknown) {
+  console.dir({
+    type: "HTTP RESPONSE",
+    ...requestDetails(request),
+    status: statusCode,
+    payload: response instanceof ElysiaCustomStatusResponse ? response.response : response,
+  }, { depth: null });
+}
+
 export function createApp(db: AppDatabase = createDatabase()) {
   purgeExpiredRecords(db);
 
@@ -84,19 +105,39 @@ export function createApp(db: AppDatabase = createDatabase()) {
     .onRequest(({ set }) => {
       Object.assign(set.headers, CORS_HEADERS);
     })
-    .onAfterResponse(({ request, set }) => {
-      console.log(`${request.method} ${new URL(request.url).pathname} ${set.status ?? 200}`);
+    .onTransform({ as: "global" }, ({ request, body }) => {
+      console.dir({
+        type: "HTTP REQUEST",
+        ...requestDetails(request),
+        payload: body,
+      }, { depth: null });
     })
-    .onError(({ code, error, status }) => {
-      if (error instanceof ApiError)
-        return status(error.statusCode, { error: { code: error.code, message: error.message } });
-      if (code === "VALIDATION")
-        return status(422, { error: { code: "VALIDATION_ERROR", message: "Los datos enviados no son válidos" } });
-      if (code === "NOT_FOUND")
-        return status(404, { error: { code: "ROUTE_NOT_FOUND", message: "Ruta no encontrada" } });
+    .onAfterHandle({ as: "global" }, ({ request, set, responseValue }) => {
+      logResponse(request, set.status ?? 200, responseValue);
+    })
+    .onError(({ code, error, request, status }) => {
+      if (error instanceof ApiError) {
+        const response = status(error.statusCode, { error: { code: error.code, message: error.message } });
+        logResponse(request, error.statusCode, response);
+        return response;
+      }
+      if (code === "VALIDATION") {
+        const response = status(422, {
+          error: { code: "VALIDATION_ERROR", message: "Los datos enviados no son válidos" },
+        });
+        logResponse(request, 422, response);
+        return response;
+      }
+      if (code === "NOT_FOUND") {
+        const response = status(404, { error: { code: "ROUTE_NOT_FOUND", message: "Ruta no encontrada" } });
+        logResponse(request, 404, response);
+        return response;
+      }
 
       console.error(error);
-      return status(500, { error: { code: "INTERNAL_ERROR", message: "Error interno del servidor" } });
+      const response = status(500, { error: { code: "INTERNAL_ERROR", message: "Error interno del servidor" } });
+      logResponse(request, 500, response);
+      return response;
     })
     .as("global")
     .options("/*", ({ status }) => status(204))

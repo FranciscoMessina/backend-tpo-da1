@@ -76,10 +76,15 @@ export function getPublicUser(db: AppDatabase, userId: string) {
  */
 export function expireStaleOffers(db: AppDatabase) {
   db.update(offers)
-    .set({ status: "expired", updatedAt: nowIso() })
+    .set({ status: "expired", buyerHasUpdate: true, sellerHasUpdate: true, updatedAt: nowIso() })
     .where(and(or(eq(offers.status, "pending"), eq(offers.status, "countered")), lte(offers.expiresAt, nowIso())))
     .run();
 }
+
+/** Consigna 9: plazo para calificar una operación, contado desde que se concretó. */
+export const REVIEW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const reviewDeadline = (completedAt: string) => new Date(new Date(completedAt).getTime() + REVIEW_WINDOW_MS).toISOString();
 
 /**
  * Consigna 4/8: la dirección exacta de una publicación solo se revela al vendedor y al

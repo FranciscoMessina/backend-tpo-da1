@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // Consigna 2 (Perfil y Reputación): datos personales editables, incluida la foto de perfil.
 export const users = sqliteTable("users", {
@@ -37,9 +37,10 @@ export const sessions = sqliteTable("sessions", {
   createdAt: text("created_at").notNull(),
 }, (table) => [index("idx_sessions_token").on(table.tokenHash)]);
 
-// Consigna 5 (Publicar un artículo): la dirección exacta se carga con coordenadas en el alta guiada.
-// Consigna 4/7 (Detalle / Ofertas): address/latitude/longitude solo se exponen al vendedor y al
-// comprador cuya oferta fue aceptada (ver `canViewAddress` en routes/publications.ts).
+// Consigna 5 (Publicar un artículo): se guarda la dirección exacta. La zona no se duplica acá:
+// siempre se obtiene del perfil del vendedor.
+// Consigna 4/7 (Detalle / Ofertas): address solo se expone al vendedor y al comprador cuya
+// oferta fue aceptada (ver `canViewAddress` en routes/publications.ts).
 export const publications = sqliteTable("publications", {
   id: text("id").primaryKey(),
   sellerId: text("seller_id").notNull().references(() => users.id, { onDelete: "cascade" }),
@@ -50,10 +51,7 @@ export const publications = sqliteTable("publications", {
   category: text("category").notNull(),
   priceCents: integer("price_cents").notNull(),
   itemCondition: text("item_condition", { enum: ["new", "like_new", "used"] }).notNull(),
-  zone: text("zone").notNull(),
   address: text("address").notNull(),
-  latitude: real("latitude").notNull(),
-  longitude: real("longitude").notNull(),
   // Sin estado "draft": el alta guiada vive en el cliente Android y solo llega al servidor
   // cuando está completa, ya como "active" (ver POST /publications).
   status: text("status", { enum: ["active", "paused", "sold"] }).notNull(),
@@ -120,6 +118,9 @@ export const offers = sqliteTable("offers", {
   status: text("status", {
     enum: ["pending", "countered", "accepted", "rejected", "expired", "cancelled"],
   }).notNull(),
+  // Novedades sin leer por cada parte (nueva oferta, contraoferta, cambio de estado); se limpian con POST /me/offers/read.
+  buyerHasUpdate: integer("buyer_has_update", { mode: "boolean" }).notNull().default(false),
+  sellerHasUpdate: integer("seller_has_update", { mode: "boolean" }).notNull().default(false),
   expiresAt: text("expires_at").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
@@ -153,4 +154,3 @@ export const reviews = sqliteTable("reviews", {
   uniqueIndex("review_operation_reviewer_unique").on(table.operationId, table.reviewerId),
   index("idx_reviews_reviewed_user").on(table.reviewedUserId),
 ]);
-

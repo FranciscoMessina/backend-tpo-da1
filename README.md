@@ -90,13 +90,15 @@ Para entrar con OTP se usa `purpose: "login"`. También existe `POST /auth/login
 |---|---|---|
 | Auth | `POST /auth/otp/request`, `/auth/otp/resend`, `/auth/otp/verify` | Registro y acceso por código |
 | Auth | `POST /auth/login/password`, `POST /auth/logout` | Login tradicional y cierre de sesión |
-| Perfil | `GET /me`, `PATCH /me` | Perfil privado (incluye `avatarUrl`) |
+| Perfil | `GET /me`, `PATCH /me` | Perfil privado (incluye `avatarUrl`; GET informa `hasPassword`) |
 | Perfil | `GET /users/:id` | Reputación, antigüedad y publicaciones activas |
+| Perfil | `GET /users/:id/reviews` | Comentarios y calificaciones recibidas, paginados |
 | Home | `GET /publications` | Paginación, texto, categoría, precio, condición, zona y orden |
 | Home | `GET /categories` | Categorías disponibles |
+| Home | `GET /zones` | Zonas únicas de vendedores con publicaciones activas |
 | Detalle | `GET /publications/:id` | Galería, vendedor, preguntas y acciones disponibles; dirección oculta hasta que se acepta una oferta |
-| Publicación | `POST /publications` | Crear una publicación completa (queda activa de inmediato) |
-| Publicación | `PATCH /publications/:id` | Editar una publicación propia (incluida la dirección/coordenadas) |
+| Publicación | `POST /publications` | Crear una publicación completa; la zona se hereda del perfil |
+| Publicación | `PATCH /publications/:id` | Editar una publicación propia (incluida la dirección) |
 | Publicación | `PATCH /publications/:id/status` | Pausar o reactivar |
 | Publicación | `GET /me/publications` | Listar publicaciones propias por estado |
 | Imágenes | `POST /uploads/images`, `GET /uploads/:filename` | Subir y servir JPG, PNG o WebP de hasta 5 MB (fotos de publicación o de perfil) |
@@ -107,16 +109,20 @@ Para entrar con OTP se usa `purpose: "login"`. También existe `POST /auth/login
 | Preguntas | `POST /publications/:id/questions`, `POST /questions/:id/answer` | Consulta y respuesta |
 | Ofertas | `POST /publications/:id/offers`, `POST /offers/:id/respond` | Ofertar (con mensaje opcional) y aceptar/rechazar/contraofertar |
 | Ofertas | `POST /offers/:id/respond-to-counter` | El comprador acepta o rechaza la contraoferta del vendedor |
-| Ofertas | `POST /offers/:id/cancel`, `GET /me/offers` | Cancelar una oferta propia y listar las propias (vencen solas pasado su plazo) |
-| Operaciones | `GET /me/operations`, `POST /operations/:id/reviews` | Historial (filtrable por tipo y fecha, con link "Cómo llegar") y calificaciones (ventana de 7 días) |
+| Ofertas | `POST /offers/:id/cancel`, `GET /me/offers` | Cancelar una oferta propia y listar las propias (vencen solas pasado su plazo); cada item trae portada, contraparte y `hasUpdate` |
+| Ofertas | `GET /offers/:id` | Detalle de una oferta propia (misma forma que un item de `GET /me/offers`) |
+| Ofertas | `POST /me/offers/read` | Marcar como leídas las novedades de las ofertas |
+| Operaciones | `GET /me/operations`, `GET /operations/:id` | Historial filtrable por tipo y fecha, y detalle; incluyen contraparte, `canReview` y `reviewDeadline` |
+| Operaciones | `POST /operations/:id/reviews` | Calificar a la contraparte (ventana de 7 días, una vez por parte) |
 
-`GET /docs` devuelve este mismo índice en JSON.
+`GET /docs` devuelve este mismo índice en JSON. El contrato completo (cuerpos, respuestas y errores de cada endpoint) está en [`api-endpoints.json`](api-endpoints.json).
 
 ### Parámetros del home
 
-`GET /publications` acepta `page`, `pageSize`, `q`, `category`, `minPrice`, `maxPrice`, `condition`, `zone` y `sort`. Los órdenes son `recent`, `price_asc` y `price_desc`. La cercanía actual es coincidencia por zona; si la app incorpora coordenadas, se puede reemplazar por un radio geográfico.
+`GET /publications` acepta `page`, `pageSize`, `q`, `category`, `minPrice`, `maxPrice`, `condition`, `zone` y `sort`. Los órdenes son `recent`, `price_asc` y `price_desc`. El filtro de zona compara contra la zona actual del perfil del vendedor.
 
-Las condiciones son `new`, `like_new` y `used`. Las categorías se consultan con `GET /categories`.
+Las condiciones son `new`, `like_new` y `used`. Las categorías se consultan con `GET /categories`
+y las opciones vigentes del filtro de zona con `GET /zones`.
 
 ## Alta guiada e imágenes
 
@@ -129,23 +135,27 @@ tiene noción de borrador ni de pasos: recién recibe la publicación cuando est
 Android sube cada foto como `multipart/form-data` a `POST /uploads/images` (campo `file`) y guarda
 las URLs devueltas para mandarlas en `imageUrls` al crear o editar la publicación.
 
-`POST /publications` exige título, descripción, categoría, precio, condición, zona, dirección con
-coordenadas y al menos una imagen; si falta algo, la validación del body lo rechaza con 422 antes
-de tocar la base.
+`POST /publications` exige título, descripción, categoría, precio, condición, dirección y al menos
+una imagen; si falta algo, la validación del body lo rechaza con 422 antes de tocar la base. La zona
+no se recibe ni se guarda en la publicación: siempre se obtiene de la zona actual del vendedor.
 
 ## Novedades y reputación
 
 - Si cambia el precio de una publicación favorita, `GET /me/favorites` devuelve `hasUpdate` y `priceChanged`.
 - Al publicar un artículo nuevo se incrementa `unreadCount` de cada búsqueda guardada compatible.
-- Aceptar una oferta (directa o tras una contraoferta) marca el artículo como vendido, rechaza las demás ofertas pendientes y crea una operación.
-- Comprador y vendedor pueden calificar una vez por operación, dentro de los 7 días de concretada. El perfil público calcula promedio, cantidad de calificaciones, compras y ventas concretadas.
+- Aceptar una oferta (directa o tras una contraoferta) es atómico: en una sola transacción crea la operación, marca el artículo como vendido y rechaza las demás ofertas pendientes. Si la publicación ya no está activa o la oferta ya se resolvió, no se persiste nada.
+- Las ofertas tienen novedades por participante: una oferta nueva, una contraoferta, una respuesta, una cancelación o un vencimiento dejan `hasUpdate` en la otra parte. `GET /me/offers` devuelve `unreadCount` y `POST /me/offers/read` lo pone en cero.
+- Comprador y vendedor pueden calificar una vez por operación, dentro de los 7 días de concretada. El servidor gobierna esa regla: cada operación informa `canReview` y `reviewDeadline`, y `POST /operations/:id/reviews` rechaza las calificaciones ajenas, repetidas o vencidas. El perfil público calcula promedio, cantidad de calificaciones, compras y ventas concretadas, y `GET /users/:id/reviews` lista los comentarios recibidos.
 
 ## Ofertas, dirección y mapa
 
 - Una oferta tiene un plazo de vigencia (`OFFER_TTL_DAYS`) y pasa a `expired` automáticamente al vencer; esto se aplica de forma perezosa cada vez que se lee o se actúa sobre una oferta (`expireStaleOffers` en `src/queries.ts`), además de en un barrido al arrancar la app.
 - El vendedor puede `accept`, `reject` o `counter` (con `counterAmount`) una oferta pendiente; si contraoferta, el comprador la resuelve en `POST /offers/:id/respond-to-counter`.
-- La dirección exacta de una publicación (`address`, `latitude`, `longitude`) solo se devuelve en `GET /publications/:id` al vendedor o al comprador cuya oferta ya fue aceptada; el resto ve `addressLocked: true` y los campos en `null`.
-- Cuando la dirección es visible, la respuesta incluye `mapsUrl`: un link de Google Maps en modo navegación listo para el botón "Cómo llegar" del cliente Android.
+- La dirección exacta de una publicación (`address`) solo se devuelve en `GET /publications/:id` al vendedor o al comprador cuya oferta ya fue aceptada; el resto ve `addressLocked: true` y `address: null`.
+
+## Errores
+
+Todo error responde `{ "error": { "code": "...", "message": "..." } }`; el cliente debe decidir por `code`. Para ofertas y calificaciones los códigos estables son `OFFER_EXPIRED`, `OFFER_ALREADY_RESOLVED`, `PUBLICATION_NOT_ACTIVE`, `REVIEW_WINDOW_EXPIRED` y `REVIEW_ALREADY_EXISTS`. El catálogo completo está en `api-endpoints.json`.
 
 ## Biometría y modo sin conexión (consignas 1 y 6)
 
