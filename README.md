@@ -50,9 +50,9 @@ Para cargar datos de prueba (el comando es idempotente y no borra datos existent
 bun run db:seed
 ```
 
-El seed crea publicaciones, favoritos, búsquedas, preguntas, ofertas, una operación y reseñas.
-También crea `ana@example.com`, `bruno@example.com` y `carla@example.com`; los tres usuarios
-pueden iniciar sesión con la contraseña `password123`.
+El seed crea 4 usuarios con 5 publicaciones cada uno, además de favoritos, búsquedas, preguntas,
+ofertas, una operación y reseñas. Los usuarios son `ana@example.com`, `bruno@example.com`,
+`carla@example.com` y `diego@example.com`; todos pueden iniciar sesión con la contraseña `password123`.
 
 Al iniciar la API también se aplican automáticamente las migraciones pendientes, incluyendo en los tests con una base SQLite en memoria.
 
