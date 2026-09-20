@@ -371,7 +371,7 @@
       "method": "GET",
       "path": "/publications/:id",
       "auth": "optional",
-      "summary": "Detalle. Las pausadas sólo las ve su vendedor. La dirección exacta sólo se revela al vendedor y al comprador de la operación creada al aceptar una oferta.",
+      "summary": "Detalle. Las publicaciones pausadas siguen siendo visibles, pero no permiten acciones de comprador. La dirección exacta sólo se revela al vendedor y al comprador de la operación creada al aceptar una oferta.",
       "response": {
         "id": "uuid",
         "sellerId": "uuid",

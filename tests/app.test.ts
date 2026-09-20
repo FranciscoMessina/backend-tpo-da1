@@ -230,8 +230,9 @@ describe("Marketplace API", () => {
     expect(detail.data.questions[0].askerName).toBe("Q Buyer");
   });
 
-  test("pausar oculta la publicación del feed y del detalle ajeno", async () => {
+  test("pausar oculta la publicación del feed, pero mantiene el detalle sin acciones", async () => {
     const seller = await register("paused-seller@example.com", "Paused Seller");
+    const buyer = await register("paused-buyer@example.com", "Paused Buyer");
     const publicationId = await publish(seller.token, { title: "Mesa ratona", category: "home", price: 120 });
 
     const paused = await api(`/publications/${publicationId}/status`, {
@@ -243,9 +244,19 @@ describe("Marketplace API", () => {
 
     const feed = await api("/publications?q=ratona");
     expect(feed.data.pagination.total).toBe(0);
-    expect((await api(`/publications/${publicationId}`)).response.status).toBe(404);
-    // El dueño sí la ve.
-    expect((await api(`/publications/${publicationId}`, { token: seller.token })).response.status).toBe(200);
+    const detail = await api(`/publications/${publicationId}`, { token: buyer.token });
+    expect(detail.response.status).toBe(200);
+    expect(detail.data.status).toBe("paused");
+    expect(detail.data.actions).toEqual({
+      canAsk: false,
+      canOffer: false,
+      canFavorite: false,
+      canManage: false,
+    });
+
+    const ownerDetail = await api(`/publications/${publicationId}`, { token: seller.token });
+    expect(ownerDetail.response.status).toBe(200);
+    expect(ownerDetail.data.actions.canManage).toBe(true);
 
     const reactivated = await api(`/publications/${publicationId}/status`, {
       method: "PATCH",

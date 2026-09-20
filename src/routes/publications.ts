@@ -224,9 +224,7 @@ export function publicationRoutes(db: AppDatabase) {
       const publication = db.select().from(publications).where(eq(publications.id, params.id)).get();
       const viewer = await optionalUser(db, headers);
       const isOwner = !!viewer && viewer.id === publication?.sellerId;
-      // Las pausadas solo son visibles para su vendedor.
-      if (!publication || (publication.status === "paused" && !isOwner))
-        throw new ApiError(404, "PUBLICATION_NOT_FOUND", "Publicación no encontrada");
+      if (!publication) throw new ApiError(404, "PUBLICATION_NOT_FOUND", "Publicación no encontrada");
 
       const questionRows = db
         .select({
@@ -267,7 +265,7 @@ export function publicationRoutes(db: AppDatabase) {
         actions: {
           canAsk: canInteract,
           canOffer: canInteract,
-          canFavorite: !!viewer && !isOwner,
+          canFavorite: canInteract,
           canManage: isOwner,
         },
       };
@@ -372,7 +370,7 @@ export function publicationRoutes(db: AppDatabase) {
           .select()
           .from(publications)
           .where(where)
-          .orderBy(desc(publications.updatedAt))
+          .orderBy(desc(publications.createdAt))
           .all()
           .map((item) => ({ ...item, zone: user.zone, images: listImages(db, item.id) }));
         return { items };
